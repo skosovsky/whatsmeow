@@ -9,6 +9,7 @@ package socket
 import (
 	"context"
 	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"sync"
@@ -91,8 +92,29 @@ func (ns *NoiseSocket) Stop(disconnect, allowOnDisconnect bool) {
 
 var errNoiseWritePanic = errors.New("noise frame writer failed")
 
-// SendFrame keeps writer admission until the actual websocket write returns.
-func (ns *NoiseSocket) SendFrame(ctx context.Context, plaintext []byte) (err error) {
+// SendFrame holds writer admission through the actual websocket write. Cancellation
+// cannot abandon a writer goroutine that later emits an authorized frame.
+func (ns *NoiseSocket) SendFrame(ctx context.Context, plaintext []byte) error {
+	return ns.SendFrameWithGuard(ctx, plaintext, nil)
+}
+
+// ErrFrameAuthority deliberately contains no callback diagnostics or payload.
+var ErrFrameAuthority = errors.New("frame authority denied")
+
+func checkFrameAuthority(ctx context.Context, check func(context.Context) error) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = ErrFrameAuthority
+		}
+	}()
+	if check != nil && check(ctx) != nil {
+		return ErrFrameAuthority
+	}
+	return ctx.Err()
+}
+
+// SendFrameWithGuard evaluates trusted authority after writer admission and before encryption.
+func (ns *NoiseSocket) SendFrameWithGuard(ctx context.Context, plaintext []byte, beforeWrite func(context.Context) error) (err error) {
 	ns.writeGateOnce.Do(func() { ns.writeGate = make(chan struct{}, 1) })
 	select {
 	case ns.writeGate <- struct{}{}:
@@ -113,6 +135,9 @@ func (ns *NoiseSocket) SendFrame(ctx context.Context, plaintext []byte) (err err
 	if ns.destroyed.Load() {
 		return ErrSocketClosed
 	}
+	if err := checkFrameAuthority(ctx, beforeWrite); err != nil {
+		return err
+	}
 	// Encryption counters must never be reused after an uncertain or cancelled write.
 	ciphertext := ns.writeKey.Seal(nil, generateIV(ns.writeCounter), plaintext, nil)
 	ns.writeCounter++
@@ -132,7 +157,28 @@ func (ns *NoiseSocket) receiveEncryptedFrame(ctx context.Context, ciphertext []b
 		ns.fs.log.Warnf("Failed to decrypt frame: %v", err)
 		return
 	}
-	ns.onFrame(ctx, plaintext)
+	proof := &authenticatedFrame{socket: ns, digest: sha256.Sum256(plaintext)}
+	proof.active.Store(true)
+	defer proof.active.Store(false)
+	ns.onFrame(context.WithValue(ctx, authenticatedFrameKey{}, proof), plaintext)
+}
+
+type authenticatedFrameKey struct{}
+type authenticatedFrame struct {
+	socket *NoiseSocket
+	digest [32]byte
+	active atomic.Bool
+	used   atomic.Bool
+}
+
+// ConsumeAuthenticatedFrame proves only the original decrypted receive boundary.
+// A captured context cannot mint another proof or bind different bytes/socket.
+func (ns *NoiseSocket) ConsumeAuthenticatedFrame(ctx context.Context, data []byte) bool {
+	if ns == nil || ctx == nil {
+		return false
+	}
+	p, ok := ctx.Value(authenticatedFrameKey{}).(*authenticatedFrame)
+	return ok && p != nil && p.socket == ns && p.active.Load() && p.digest == sha256.Sum256(data) && p.used.CompareAndSwap(false, true)
 }
 
 func (ns *NoiseSocket) IsConnected() bool {

@@ -106,14 +106,20 @@ type infoQuery struct {
 
 	Timeout time.Duration
 	NoRetry bool
+	// BeforeWrite checks trusted authority after native writer queue admission and forces NoRetry.
+	BeforeWrite func(context.Context) error
 }
 
-func (cli *Client) sendIQAsyncAndGetData(ctx context.Context, query *infoQuery) (<-chan *waBinary.Node, []byte, error) {
+func (cli *Client) sendIQAsyncAndGetData(ctx context.Context, query *infoQuery) (chan *waBinary.Node, []byte, error) {
 	if cli == nil {
 		return nil, nil, ErrClientIsNil
 	}
 	if len(query.ID) == 0 {
 		query.ID = cli.generateRequestID()
+	}
+	if query.BeforeWrite != nil {
+		query.NoRetry = true
+		ctx = withFrameAuthority(ctx, "iq", query.ID, query.BeforeWrite)
 	}
 	waiter := cli.waitResponse(query.ID)
 	attrs := waBinary.Attrs{
@@ -157,6 +163,16 @@ func (cli *Client) sendIQ(ctx context.Context, query infoQuery) (*waBinary.Node,
 	if err != nil {
 		return nil, err
 	}
+	// Timeout/cancellation must not retain the original waiter. Do not close it:
+	// receiveResponse may already own this buffered channel outside the lock.
+	// A later replacement under the same ID belongs to its own attempt.
+	defer func() {
+		cli.responseWaitersLock.Lock()
+		if cli.responseWaiters[query.ID] == (chan<- *waBinary.Node)(resChan) {
+			delete(cli.responseWaiters, query.ID)
+		}
+		cli.responseWaitersLock.Unlock()
+	}()
 	select {
 	case res := <-resChan:
 		if isDisconnectNode(res) {

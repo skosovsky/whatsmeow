@@ -206,6 +206,9 @@ func (cli *Client) tryHandleRetryReceipt(ctx context.Context, receipt *events.Re
 
 // handleRetryReceipt handles an incoming retry receipt for an outgoing message.
 func (cli *Client) handleRetryReceipt(ctx context.Context, receipt *events.Receipt, node *waBinary.Node) error {
+	if cli.DisableRetryReceipts {
+		return nil
+	}
 	retryChild, ok := node.GetOptionalChildByTag("retry")
 	if !ok {
 		return &ElementMissingError{Tag: "retry", In: "retry receipt"}

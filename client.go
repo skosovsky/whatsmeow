@@ -72,10 +72,13 @@ type Client struct {
 	recvLog waLog.Logger
 	sendLog waLog.Logger
 
-	socket           clientSocket
-	socketLock       sync.RWMutex
-	socketWait       chan struct{}
-	handlerQueueWait chan struct{}
+	socket                 clientSocket
+	socketLock             sync.RWMutex
+	groupLeaveAttempts     sync.Map // private original guarded leave IQ evidence
+	messageRevokeAttempts  sync.Map // bounded private original message ACK evidence
+	messageRevokeAdmission atomic.Int32
+	socketWait             chan struct{}
+	handlerQueueWait       chan struct{}
 
 	isLoggedIn            atomic.Bool
 	paired                atomic.Bool
@@ -164,6 +167,9 @@ type Client struct {
 	// Note: in DMs, the "to" field may be different from what you originally sent to (LID vs phone number),
 	// make sure to check both if necessary.
 	GetMessageForRetry func(requester, to types.JID, id types.MessageID) *waE2E.Message
+	// DisableRetryReceipts refuses all incoming message retry requests before payload lookup.
+	// Configure before connecting; true also prevents retries of persisted or custom payloads.
+	DisableRetryReceipts bool
 	// PreRetryCallback is called before a retry receipt is accepted.
 	// If it returns false, the accepting will be cancelled and the retry receipt will be ignored.
 	PreRetryCallback func(receipt *events.Receipt, id types.MessageID, retryCount int, msg *waE2E.Message) bool
@@ -869,6 +875,8 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 		return
 	}
 	cli.recvLog.Debugf("%s", node)
+	cli.captureOriginalMessageRevokeACK(ctx, node, data)
+	capturedLeaveSocket := cli.captureOriginalGroupLeaveACK(ctx, node, data)
 	if node.Tag == "xmlstreamend" {
 		if !cli.isExpectedDisconnect() {
 			cli.Log.Warnf("Received stream end frame")
@@ -876,6 +884,11 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte, queue chan *waB
 		// TODO should we do something else?
 	} else if cli.receiveResponse(ctx, node) {
 		// handled
+	} else if capturedLeaveSocket != nil && cli.dispatchUnmatchedGroupLeaveResponse(capturedLeaveSocket, node, decompressed) {
+		// Original authenticated capture won a race with waiter removal. Reuse
+		// that private origin, never consume its frame authority a second time.
+	} else if cli.handleUnmatchedMutationFrame(ctx, node, data, decompressed) {
+		// Private authenticated evidence; the application still owns reconciliation.
 	} else if _, ok := cli.nodeHandlers[node.Tag]; ok {
 		select {
 		case queue <- node:
@@ -973,6 +986,15 @@ func (cli *Client) sendNodeAndGetData(ctx context.Context, node waBinary.Node) (
 	}
 
 	cli.sendLog.Debugf("%s", &node)
+	guard := frameGuardForNode(ctx, node)
+	if ns, ok := sock.(*socket.NoiseSocket); ok {
+		ctx = context.WithValue(ctx, frameSocketKey{}, ns)
+		return payload, ns.SendFrameWithGuard(ctx, payload, guard)
+	}
+	// A test transport cannot issue native authority or bypass a requested guard.
+	if guard != nil {
+		return nil, socket.ErrFrameAuthority
+	}
 	return payload, sock.SendFrame(ctx, payload)
 }
 

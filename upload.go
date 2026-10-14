@@ -67,6 +67,13 @@ type UploadResponse struct {
 //
 // The same applies to the other message types like DocumentMessage, just replace the struct type and Message field name.
 func (cli *Client) Upload(ctx context.Context, plaintext []byte, appInfo MediaType) (resp UploadResponse, err error) {
+	if ctx.Value(uploadAuthorityKey{}) != nil {
+		return UploadResponse{}, ErrUploadAuthority
+	}
+	return cli.uploadOwned(ctx, plaintext, appInfo)
+}
+
+func (cli *Client) uploadOwned(ctx context.Context, plaintext []byte, appInfo MediaType) (resp UploadResponse, err error) {
 	resp.FileLength = uint64(len(plaintext))
 	resp.MediaKey = random.Bytes(32)
 
@@ -102,6 +109,9 @@ func (cli *Client) Upload(ctx context.Context, plaintext []byte, appInfo MediaTy
 //
 // To use only one file, pass the same file as both plaintext and tempFile. This will cause the file to be overwritten with encrypted data.
 func (cli *Client) UploadReader(ctx context.Context, plaintext io.Reader, tempFile io.ReadWriteSeeker, appInfo MediaType) (resp UploadResponse, err error) {
+	if ctx.Value(uploadAuthorityKey{}) != nil {
+		return UploadResponse{}, ErrUploadAuthority
+	}
 	resp.MediaKey = random.Bytes(32)
 	iv, cipherKey, macKey, _ := getMediaKeys(resp.MediaKey, appInfo)
 	if tempFile == nil {
@@ -162,6 +172,9 @@ func (cli *Client) UploadReader(ctx context.Context, plaintext io.Reader, tempFi
 //	})
 //	// handle error again
 func (cli *Client) UploadNewsletter(ctx context.Context, data []byte, appInfo MediaType) (resp UploadResponse, err error) {
+	if ctx.Value(uploadAuthorityKey{}) != nil {
+		return UploadResponse{}, ErrUploadAuthority
+	}
 	resp.FileLength = uint64(len(data))
 	hash := sha256.Sum256(data)
 	resp.FileSHA256 = hash[:]
@@ -175,6 +188,9 @@ func (cli *Client) UploadNewsletter(ctx context.Context, data []byte, appInfo Me
 // Unlike [UploadReader], this does not require a temporary file. However, the data needs to be hashed first,
 // so an [io.ReadSeeker] is required to be able to read the data twice.
 func (cli *Client) UploadNewsletterReader(ctx context.Context, data io.ReadSeeker, appInfo MediaType) (resp UploadResponse, err error) {
+	if ctx.Value(uploadAuthorityKey{}) != nil {
+		return UploadResponse{}, ErrUploadAuthority
+	}
 	hasher := sha256.New()
 	var fileLength int64
 	fileLength, err = io.Copy(hasher, data)
@@ -194,9 +210,24 @@ func (cli *Client) UploadNewsletterReader(ctx context.Context, data io.ReadSeeke
 }
 
 func (cli *Client) rawUpload(ctx context.Context, dataToUpload io.Reader, uploadSize uint64, fileHash []byte, appInfo MediaType, newsletter bool, resp *UploadResponse) error {
+	if cli == nil {
+		return ErrClientIsNil
+	}
+	client, cleanup, err := guardedUploadHTTPClient(ctx, cli.mediaHTTP)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if authority, _ := ctx.Value(uploadAuthorityKey{}).(*uploadAuthority); authority != nil && (newsletter || authority.proof.MediaType != appInfo || resp == nil || resp.FileLength != authority.proof.Bytes || !bytes.Equal(resp.FileSHA256, authority.proof.SHA256[:])) {
+		return ErrUploadAuthority
+	}
 	mediaConn, err := cli.refreshMediaConn(ctx, false)
 	if err != nil {
 		return fmt.Errorf("failed to refresh media connections: %w", err)
+	}
+
+	if _, guarded := ctx.Value(uploadAuthorityKey{}).(*uploadAuthority); guarded && (mediaConn == nil || len(mediaConn.Hosts) == 0) {
+		return ErrUploadAuthority
 	}
 
 	token := base64.URLEncoding.EncodeToString(fileHash)
@@ -241,11 +272,16 @@ func (cli *Client) rawUpload(ctx context.Context, dataToUpload io.Reader, upload
 	req.Header.Set("Origin", socket.Origin)
 	req.Header.Set("Referer", socket.Origin+"/")
 
-	httpResp, err := cli.mediaHTTP.Do(req)
+	if _, guarded := ctx.Value(uploadAuthorityKey{}).(*uploadAuthority); guarded {
+		req.GetBody = nil
+	}
+	httpResp, err := client.Do(req)
 	if err != nil {
 		err = fmt.Errorf("failed to execute request: %w", err)
 	} else if httpResp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("upload failed with status code %d", httpResp.StatusCode)
+	} else if _, guarded := ctx.Value(uploadAuthorityKey{}).(*uploadAuthority); guarded {
+		err = decodeGuardedUploadResponse(httpResp.Body, resp)
 	} else if err = json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		err = fmt.Errorf("failed to parse upload response: %w", err)
 	}

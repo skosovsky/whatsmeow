@@ -59,10 +59,11 @@ func (cli *Client) refreshMediaConn(ctx context.Context, force bool) (*MediaConn
 
 func (cli *Client) queryMediaConn(ctx context.Context) (*MediaConn, error) {
 	resp, err := cli.sendIQ(ctx, infoQuery{
-		Namespace: "w:m",
-		Type:      "set",
-		To:        types.ServerJID,
-		Content:   []waBinary.Node{{Tag: "media_conn"}},
+		Namespace:   "w:m",
+		BeforeWrite: uploadPreparationGuard(ctx),
+		Type:        "set",
+		To:          types.ServerJID,
+		Content:     []waBinary.Node{{Tag: "media_conn"}},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to query media connections: %w", err)

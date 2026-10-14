@@ -143,6 +143,14 @@ type SendResponse struct {
 //
 // Trying to add multiple extra parameters will return an error.
 type SendRequestExtra struct {
+	// BeforeWrite checks trusted authority after native writer queue admission.
+	// It forces NoRetry and may run at most once for this invocation.
+	BeforeWrite func(context.Context) error
+	// NoRetry prevents disconnect-triggered resend of this original message attempt.
+	// It also avoids caching this payload for receipt retries. To deny persisted or
+	// custom retry payloads, configure Client.DisableRetryReceipts before connecting.
+	// Server acceptance remains unknown after disconnect; caller must reconcile.
+	NoRetry bool
 	// The message ID to use when sending. If this is not provided, a random message ID will be generated
 	ID types.MessageID
 	// JID of the bot to be invoked (optional)
@@ -155,10 +163,6 @@ type SendRequestExtra struct {
 	Timeout time.Duration
 	// When sending media to newsletters, the Handle field returned by the file upload.
 	MediaHandle string
-	// NoRetry disables the automatic resend after a websocket disconnect interrupts the
-	// initial acknowledgement wait. Retry receipts are controlled separately with
-	// Client.PreRetryCallback.
-	NoRetry bool
 
 	Meta *types.MsgMetaInfo
 	// use this only if you know what you are doing
@@ -224,6 +228,10 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 		} else if message.ProtocolMessage != nil && message.ProtocolMessage.GetType() == waE2E.ProtocolMessage_REVOKE {
 			req.ID = types.MessageID(message.GetProtocolMessage().GetKey().GetID())
 		}
+	}
+	if req.BeforeWrite != nil {
+		req.NoRetry = true
+		ctx = withFrameAuthority(ctx, "message", req.ID, req.BeforeWrite)
 	}
 	resp.ID = req.ID
 
@@ -391,7 +399,7 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 	defer cli.messageSendLock.Unlock()
 
 	// Peer message retries aren't implemented yet
-	if !req.Peer {
+	if !req.Peer && !req.NoRetry {
 		err = cli.addRecentMessage(ctx, to, req.ID, message, nil)
 		if err != nil {
 			return
@@ -449,11 +457,11 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 	}
 	resp.DebugTimings.Resp = time.Since(start)
 	if isDisconnectNode(respNode) {
-		start = time.Now()
 		if req.NoRetry {
 			err = &DisconnectedError{Action: "message send", Node: respNode}
 			return
 		}
+		start = time.Now()
 		respNode, err = cli.retryFrame(ctx, "message send", req.ID, data, respNode, 0)
 		resp.DebugTimings.Retry = time.Since(start)
 		if err != nil {

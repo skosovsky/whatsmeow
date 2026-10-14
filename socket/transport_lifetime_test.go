@@ -275,3 +275,127 @@ func TestNoiseDeadlineReachesActualWriterAndWaitsForExit(t *testing.T) {
 		t.Fatal("deadline retained ambiguous session or sent twice")
 	}
 }
+
+func TestNoiseFinalAuthorityRefusalKeepsCounterAndSession(t *testing.T) {
+	for _, mode := range []string{"deny", "panic", "cancel-during-check"} {
+		t.Run(mode, func(t *testing.T) {
+			// Arrange: real websocket/Noise/Frame stack; no physical write is authorized.
+			wire := newBlockingWire()
+			ns := blockingNoise(t, wire)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			check := func(context.Context) error {
+				calls++
+				if len(ns.writeGate) != 1 {
+					t.Error("authority ran before writer admission")
+				}
+				switch mode {
+				case "panic":
+					panic("private-frame-authority-canary")
+				case "cancel-during-check":
+					cancel()
+					return nil
+				default:
+					return errors.New("private-frame-authority-canary")
+				}
+			}
+			// Act: refuse at the actual Noise boundary before Seal or Write.
+			err := ns.SendFrameWithGuard(ctx, []byte("must not be written"), check)
+			// Assert: no physical worker/counter consumption or ambiguous-session close.
+			want := ErrFrameAuthority
+			if mode == "cancel-during-check" {
+				want = context.Canceled
+			}
+			if !errors.Is(err, want) || strings.Contains(err.Error(), "canary") || calls != 1 || wire.writes.Load() != 0 || ns.writeCounter != 0 || ns.destroyed.Load() || !ns.fs.IsConnected() || len(ns.writeGate) != 0 {
+				t.Fatal("authority failure touched transport/session", err, calls, wire.writes.Load(), ns.writeCounter)
+			}
+		})
+	}
+}
+
+func TestNoiseFinalAuthorityRunsAfterQueuedAdmission(t *testing.T) {
+	for _, mode := range []string{"revoked-after-queue", "cancelled-in-queue"} {
+		t.Run(mode, func(t *testing.T) {
+			// Arrange: occupy native writer admission without encryption or a physical worker.
+			wire := newBlockingWire()
+			ns := blockingNoise(t, wire)
+			ns.writeGateOnce.Do(func() { ns.writeGate = make(chan struct{}, 1) })
+			ns.writeGate <- struct{}{}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var revoked atomic.Bool
+			var calls atomic.Int32
+			ready, done := make(chan struct{}), make(chan error, 1)
+			go func() {
+				close(ready)
+				done <- ns.SendFrameWithGuard(ctx, []byte("never emit"), func(context.Context) error {
+					calls.Add(1)
+					if revoked.Load() {
+						return errors.New("authority revoked")
+					}
+					return nil
+				})
+			}()
+			waitSignal(t, ready, "queued request did not start")
+			// Act: change authority/cancellation while physical admission is occupied.
+			revoked.Store(true)
+			if mode == "cancelled-in-queue" {
+				cancel()
+			} else {
+				<-ns.writeGate
+			}
+			var err error
+			select {
+			case err = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("queued authority remained blocked")
+			}
+			if mode == "cancelled-in-queue" {
+				<-ns.writeGate
+			}
+			// Assert: denied after queue admission or cancelled without invoking the callback.
+			want, wantCalls := ErrFrameAuthority, int32(1)
+			if mode == "cancelled-in-queue" {
+				want, wantCalls = context.Canceled, 0
+			}
+			if !errors.Is(err, want) || calls.Load() != wantCalls || wire.writes.Load() != 0 || ns.writeCounter != 0 || ns.destroyed.Load() || len(ns.writeGate) != 0 {
+				t.Fatal("queue authority leaked frame/counter", err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestNoiseAuthenticatedFrameProofIsExactActiveAndSingleUse(t *testing.T) {
+	// Arrange: real AEAD receive path and private callback proof.
+	ns := &NoiseSocket{readKey: testCipher(t), fs: &FrameSocket{log: waLog.Noop}}
+	data := []byte("owned-authenticated-plaintext")
+	var captured context.Context
+	calls := 0
+	ns.onFrame = func(ctx context.Context, plain []byte) {
+		calls++
+		captured = ctx
+		// Act / Assert: foreign socket/bytes cannot consume the original proof.
+		if (&NoiseSocket{}).ConsumeAuthenticatedFrame(ctx, plain) || ns.ConsumeAuthenticatedFrame(ctx, []byte("changed")) || ns.ConsumeAuthenticatedFrame(context.Background(), plain) {
+			t.Fatal("foreign receive proof accepted")
+		}
+		if !ns.ConsumeAuthenticatedFrame(ctx, plain) || ns.ConsumeAuthenticatedFrame(ctx, plain) {
+			t.Fatal("original proof not single-use")
+		}
+	}
+	ns.receiveEncryptedFrame(context.Background(), ns.readKey.Seal(nil, generateIV(0), data, nil))
+	if calls != 1 || ns.ConsumeAuthenticatedFrame(captured, data) || ns.ConsumeAuthenticatedFrame(nil, data) {
+		t.Fatal("captured/invalid proof revived")
+	}
+	// A callback that does not consume still cannot use its proof after return.
+	ns.onFrame = func(ctx context.Context, _ []byte) { calls++; captured = ctx }
+	ns.receiveEncryptedFrame(context.Background(), ns.readKey.Seal(nil, generateIV(1), data, nil))
+	if calls != 2 || ns.ConsumeAuthenticatedFrame(captured, data) {
+		t.Fatal("expired unused proof revived")
+	}
+	// Failed authentication creates no callback or proof.
+	ns.receiveEncryptedFrame(context.Background(), []byte("not-authenticated"))
+	if calls != 2 {
+		t.Fatal("failed AEAD dispatched receive proof")
+	}
+}
