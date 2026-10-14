@@ -4,10 +4,11 @@ package whatsmeow
 
 import (
 	"context"
-	waBinary "go.mau.fi/whatsmeow/binary"
-	"go.mau.fi/whatsmeow/types"
 	"testing"
 	"time"
+
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestNativeGroupLeaveProofCurrentSocketReplacement(t *testing.T) {

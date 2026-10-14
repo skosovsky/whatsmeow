@@ -6,11 +6,12 @@ package whatsmeow
 import (
 	"context"
 	"encoding/json"
-	"go.mau.fi/whatsmeow/store"
-	waLog "go.mau.fi/whatsmeow/util/log"
 	"strings"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/store"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/types"

@@ -30,6 +30,9 @@ import (
 	"go.mau.fi/libsignal/protocol"
 	"go.mau.fi/libsignal/session"
 	"go.mau.fi/libsignal/util/optional"
+	"golang.org/x/crypto/hkdf"
+	"google.golang.org/protobuf/proto"
+
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -38,8 +41,6 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"golang.org/x/crypto/hkdf"
-	"google.golang.org/protobuf/proto"
 )
 
 // NativeMCPTestTransport exists only under an explicit test build tag. It owns

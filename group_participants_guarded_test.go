@@ -8,11 +8,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/coder/websocket"
-	"go.mau.fi/whatsmeow/store"
-	"go.mau.fi/whatsmeow/types"
-	waLog "go.mau.fi/whatsmeow/util/log"
-	"golang.org/x/crypto/hkdf"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +15,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
+	"golang.org/x/crypto/hkdf"
+
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/types"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/socket"

@@ -6,6 +6,7 @@ package whatsmeow
 import (
 	"context"
 	"errors"
+
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/types"

@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/crypto/hkdf"
+	"google.golang.org/protobuf/proto"
+
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waMsgApplication"
@@ -24,8 +27,6 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	"golang.org/x/crypto/hkdf"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestSendMessageNoRetryCountsActualNoiseFrames(t *testing.T) {

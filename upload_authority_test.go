@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/util/cbcutil"

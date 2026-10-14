@@ -2,10 +2,11 @@ package whatsmeow
 
 import (
 	"context"
-	waBinary "go.mau.fi/whatsmeow/binary"
-	"go.mau.fi/whatsmeow/types"
 	"strings"
 	"testing"
+
+	waBinary "go.mau.fi/whatsmeow/binary"
+	"go.mau.fi/whatsmeow/types"
 )
 
 func TestGroupLeaveRequestClosedSemanticBinding(t *testing.T) {
